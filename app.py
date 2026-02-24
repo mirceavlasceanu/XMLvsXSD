@@ -6,7 +6,7 @@ from tkinter import filedialog, messagebox
 
 from lxml import etree
 
-APP_VERSION = "1.3.1"
+APP_VERSION = "1.3.2"
 
 DATE_PATTERNS = [
     re.compile(r"^\d{4}-\d{2}-\d{2}$"),
@@ -273,15 +273,23 @@ class XMLXSDValidatorApp:
                 editor.tag_add("selected_lines", f"{line_no}.0", f"{line_no}.0 lineend")
                 gutter.tag_add("selected_lines", f"{line_no}.0", f"{line_no}.0 lineend")
 
-        def toggle_line(event) -> str:
-            index = gutter.index(f"@{event.x},{event.y}")
-            line_no = int(index.split(".")[0])
+        def toggle_line_by_number(line_no: int) -> None:
             if line_no in selected_lines:
                 selected_lines.remove(line_no)
             else:
                 selected_lines.add(line_no)
             render_gutter()
+
+        def toggle_line(event) -> str:
+            index = gutter.index(f"@{event.x},{event.y}")
+            line_no = int(index.split(".")[0])
+            toggle_line_by_number(line_no)
             return "break"
+
+        def toggle_line_from_editor_click(event) -> None:
+            index = editor.index(f"@{event.x},{event.y}")
+            line_no = int(index.split(".")[0])
+            toggle_line_by_number(line_no)
 
         def clear_invalid_selected_lines() -> None:
             max_line = int(editor.index("end-1c").split(".")[0])
@@ -292,6 +300,7 @@ class XMLXSDValidatorApp:
             render_gutter()
 
         gutter.bind("<Button-1>", toggle_line)
+        editor.bind("<Button-1>", toggle_line_from_editor_click, add="+")
         editor.bind("<KeyRelease>", on_editor_key_release)
 
         render_gutter()
