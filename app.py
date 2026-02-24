@@ -4,11 +4,13 @@ from pathlib import Path
 
 from lxml import etree
 
+APP_VERSION = "1.0.3"
+
 
 class XMLXSDValidatorApp:
     def __init__(self, root: tk.Tk) -> None:
         self.root = root
-        self.root.title("XML vs XSD Validator")
+        self.root.title(f"XML vs XSD Validator v{APP_VERSION}")
         self.root.geometry("900x600")
 
         self.xsd_path: Path | None = None
@@ -26,6 +28,13 @@ class XMLXSDValidatorApp:
             font=("Segoe UI", 16, "bold"),
         )
         title.pack(anchor="w", pady=(0, 12))
+
+        tk.Label(
+            container,
+            text=f"Version: {APP_VERSION}",
+            fg="#666666",
+            font=("Segoe UI", 9),
+        ).pack(anchor="w", pady=(0, 10))
 
         xsd_frame = tk.Frame(container)
         xsd_frame.pack(fill=tk.X, pady=4)
@@ -58,18 +67,17 @@ class XMLXSDValidatorApp:
         output_frame = tk.Frame(container)
         output_frame.pack(fill=tk.BOTH, expand=True, pady=(6, 0))
 
-        self.watermark = tk.Label(
-            output_frame,
-            text="Mircea",
-            font=("Segoe UI", 56, "bold"),
-            fg="#d8d8d8",
-        )
-        self.watermark.place(relx=0.5, rely=0.5, anchor="center")
-
         self.output = tk.Text(output_frame, wrap=tk.WORD, font=("Consolas", 10))
         self.output.pack(fill=tk.BOTH, expand=True)
-        self.output.bind("<KeyRelease>", self._toggle_watermark)
-        self.output.bind("<<Modified>>", self._toggle_watermark)
+
+        self.watermark = tk.Label(
+            self.output,
+            text="Mircea",
+            font=("Segoe UI", 48, "bold"),
+            fg="#d0d0d0",
+            bg=self.output.cget("bg"),
+        )
+        self.watermark.place(relx=0.5, rely=0.5, anchor="center")
 
         scrollbar = tk.Scrollbar(output_frame, command=self.output.yview)
         self.output.configure(yscrollcommand=scrollbar.set)
@@ -97,6 +105,7 @@ class XMLXSDValidatorApp:
 
     def validate(self) -> None:
         self.output.delete("1.0", tk.END)
+        self._toggle_watermark()
 
         if not self.xsd_path or not self.xml_path:
             messagebox.showwarning("Missing files", "Please select both XSD and XML files.")
@@ -132,7 +141,7 @@ class XMLXSDValidatorApp:
         self.output.see(tk.END)
         self._toggle_watermark()
 
-    def _toggle_watermark(self, _event=None) -> None:
+    def _toggle_watermark(self) -> None:
         has_content = self.output.get("1.0", tk.END).strip() != ""
         if has_content:
             self.watermark.place_forget()
@@ -142,7 +151,7 @@ class XMLXSDValidatorApp:
 
 def main() -> None:
     root = tk.Tk()
-    app = XMLXSDValidatorApp(root)
+    XMLXSDValidatorApp(root)
     root.mainloop()
 
 

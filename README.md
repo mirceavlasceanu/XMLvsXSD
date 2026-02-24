@@ -42,3 +42,8 @@ pyinstaller --onefile --windowed app.py
 ```
 
 The executable will be in `dist\app.exe`.
+
+
+## Versioning
+
+The app version is displayed in the window title and under the main heading in the UI. Increment `APP_VERSION` in `app.py` whenever you make a change.
