@@ -9,6 +9,7 @@ Simple desktop app to validate an XML file against an XSD schema.
 - Click **Validate**.
 - See all validation errors directly on screen.
 - Click **Show details** after a failed validation to open an editable XML view with highlighted error lines and an error details panel.
+- Click **Anonymize** from the main screen to open anonymization mode with save support.
 
 ## Run on Windows
 
@@ -57,3 +58,12 @@ The **Show details** button opens a split window:
 - Right side: list of validation errors.
 - Clicking an error highlights its line in the XML editor and shows full error metadata in a details panel.
 - You can save the edited XML from that window.
+
+
+## Anonymization
+
+The **Anonymize** window provides two options:
+- **Anonymize all**: anonymizes all eligible data values in XML text/attributes while keeping XML structure intact and preserving date values.
+- **Anonymize selected lines**: select lines in the editor and anonymize only values on elements sourced from those selected lines.
+
+Both modes allow saving the anonymized XML to a new file.
