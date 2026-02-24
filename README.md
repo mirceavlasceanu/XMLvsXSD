@@ -8,7 +8,7 @@ Simple desktop app to validate an XML file against an XSD schema.
 - Upload/select an **XML** file.
 - Click **Validate**.
 - See all validation errors directly on screen.
-- Click **Fix** after a failed validation to auto-correct XML structure and preview/save the fixed XML.
+- Click **Show details** after a failed validation to open an editable XML view with highlighted error lines and an error details panel.
 
 ## Run on Windows
 
@@ -50,6 +50,10 @@ The executable will be in `dist\app.exe`.
 The app version is displayed in the window title and under the main heading in the UI. Increment `APP_VERSION` in `app.py` whenever you make a change.
 
 
-## Auto-fix notes
+## Error details view
 
-The **Fix** button is a best-effort structural repair helper. It aligns root-level child elements with the XSD sequence, adds missing required children (`minOccurs`), preserves existing content when possible, and opens the corrected XML in a new window where it can be saved.
+The **Show details** button opens a split window:
+- Left side: editable XML content.
+- Right side: list of validation errors.
+- Clicking an error highlights its line in the XML editor and shows full error metadata in a details panel.
+- You can save the edited XML from that window.

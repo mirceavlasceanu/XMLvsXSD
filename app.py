@@ -1,12 +1,10 @@
 import tkinter as tk
-from copy import deepcopy
 from pathlib import Path
 from tkinter import filedialog, messagebox
 
 from lxml import etree
 
-APP_VERSION = "1.1.0"
-XSD_NS = "http://www.w3.org/2001/XMLSchema"
+APP_VERSION = "1.2.0"
 
 
 class XMLXSDValidatorApp:
@@ -18,9 +16,7 @@ class XMLXSDValidatorApp:
         self.xsd_path: Path | None = None
         self.xml_path: Path | None = None
 
-        self.last_schema: etree.XMLSchema | None = None
-        self.last_xsd_doc: etree._ElementTree | None = None
-        self.last_xml_doc: etree._ElementTree | None = None
+        self.last_error_entries: list[dict[str, str | int]] = []
 
         self._build_ui()
 
@@ -68,15 +64,15 @@ class XMLXSDValidatorApp:
             pady=6,
         ).pack(side=tk.LEFT)
 
-        self.fix_button = tk.Button(
+        self.details_button = tk.Button(
             controls,
-            text="Fix",
-            command=self.fix_xml,
+            text="Show details",
+            command=self.show_details,
             state=tk.DISABLED,
             padx=16,
             pady=6,
         )
-        self.fix_button.pack(side=tk.LEFT, padx=(8, 0))
+        self.details_button.pack(side=tk.LEFT, padx=(8, 0))
 
         tk.Label(container, text="Validation output:", anchor="w").pack(anchor="w")
 
@@ -122,7 +118,8 @@ class XMLXSDValidatorApp:
     def validate(self) -> None:
         self.output.delete("1.0", tk.END)
         self._toggle_watermark()
-        self.fix_button.config(state=tk.DISABLED)
+        self.details_button.config(state=tk.DISABLED)
+        self.last_error_entries = []
 
         if not self.xsd_path or not self.xml_path:
             messagebox.showwarning("Missing files", "Please select both XSD and XML files.")
@@ -139,137 +136,139 @@ class XMLXSDValidatorApp:
             xml_doc = etree.parse(str(self.xml_path))
         except (etree.XMLSyntaxError, OSError) as exc:
             self._write(f"XML could not be loaded:\n{exc}\n")
+            if isinstance(exc, etree.XMLSyntaxError):
+                self.last_error_entries = [
+                    {
+                        "line": exc.lineno or 1,
+                        "column": getattr(exc, "position", (1, 1))[1],
+                        "message": str(exc),
+                        "domain": "XMLSyntax",
+                        "type": "XMLSyntaxError",
+                    }
+                ]
+                self.details_button.config(state=tk.NORMAL)
             return
 
-        self.last_xsd_doc = xsd_doc
-        self.last_schema = schema
-        self.last_xml_doc = xml_doc
-
-        if schema.validate(xml_doc):
+        is_valid = schema.validate(xml_doc)
+        if is_valid:
             self._write("✅ XML is valid against the selected XSD.\n")
             return
 
         self._write("❌ XML is NOT valid. Errors:\n\n")
         for entry in schema.error_log:
+            self.last_error_entries.append(
+                {
+                    "line": entry.line,
+                    "column": entry.column,
+                    "message": entry.message,
+                    "domain": entry.domain_name,
+                    "type": entry.type_name,
+                }
+            )
             self._write(
                 f"Line {entry.line}, Column {entry.column}: {entry.message} "
                 f"(Domain: {entry.domain_name}, Type: {entry.type_name})\n"
             )
 
-        self.fix_button.config(state=tk.NORMAL)
+        self.details_button.config(state=tk.NORMAL)
 
-    def fix_xml(self) -> None:
-        if not self.last_xsd_doc or not self.last_xml_doc or not self.last_schema:
-            messagebox.showwarning("No validation context", "Please validate an XML/XSD pair first.")
+    def show_details(self) -> None:
+        if not self.xml_path or not self.last_error_entries:
+            messagebox.showwarning("No details", "Run validation first and make sure there are errors.")
             return
 
-        try:
-            fixed_doc = self._auto_fix_xml_structure(self.last_xsd_doc, self.last_xml_doc)
-            fixed_text = etree.tostring(
-                fixed_doc,
-                pretty_print=True,
-                encoding="utf-8",
-                xml_declaration=True,
-            ).decode("utf-8")
-        except Exception as exc:  # best-effort fixer
-            messagebox.showerror("Fix failed", f"Could not auto-fix XML:\n{exc}")
-            return
+        xml_text = self.xml_path.read_text(encoding="utf-8", errors="replace")
 
-        is_valid = self.last_schema.validate(fixed_doc)
-        status = "✅ Auto-fixed XML validates against XSD." if is_valid else "⚠️ Auto-fix applied, but XML is still not fully valid."
-        self._show_fixed_xml_window(fixed_text, status)
-
-    def _auto_fix_xml_structure(
-        self, xsd_doc: etree._ElementTree, xml_doc: etree._ElementTree
-    ) -> etree._ElementTree:
-        source_root = xml_doc.getroot()
-        fixed_root = etree.Element(source_root.tag, nsmap=source_root.nsmap)
-        fixed_root.attrib.update(source_root.attrib)
-
-        root_def = self._find_xsd_root_definition(xsd_doc.getroot(), self._local_name(source_root.tag))
-        expected_children = self._extract_expected_child_elements(root_def)
-
-        used = set()
-        for child_name, min_occurs in expected_children:
-            matches = [
-                (index, child)
-                for index, child in enumerate(source_root)
-                if index not in used and self._local_name(child.tag) == child_name
-            ]
-
-            if matches:
-                for index, matched in matches:
-                    fixed_root.append(deepcopy(matched))
-                    used.add(index)
-                continue
-
-            for _ in range(min_occurs):
-                fixed_root.append(self._new_child_with_namespace(source_root, child_name))
-
-        for index, child in enumerate(source_root):
-            if index not in used:
-                fixed_root.append(deepcopy(child))
-
-        return etree.ElementTree(fixed_root)
-
-    def _find_xsd_root_definition(self, xsd_root: etree._Element, root_name: str) -> etree._Element:
-        path = f"./{{{XSD_NS}}}element[@name='{root_name}']"
-        root_def = xsd_root.find(path)
-        if root_def is None:
-            raise ValueError(f"Could not find root element '{root_name}' in XSD.")
-        return root_def
-
-    def _extract_expected_child_elements(self, root_def: etree._Element) -> list[tuple[str, int]]:
-        expected: list[tuple[str, int]] = []
-        sequence = root_def.find(f"./{{{XSD_NS}}}complexType/{{{XSD_NS}}}sequence")
-        if sequence is None:
-            return expected
-
-        for element in sequence.findall(f"./{{{XSD_NS}}}element"):
-            child_name = element.get("name")
-            if not child_name:
-                continue
-            min_occurs = int(element.get("minOccurs", "1"))
-            expected.append((child_name, min_occurs))
-        return expected
-
-    def _new_child_with_namespace(self, parent: etree._Element, child_name: str) -> etree._Element:
-        if parent.tag.startswith("{"):
-            namespace = parent.tag.split("}", 1)[0][1:]
-            tag = f"{{{namespace}}}{child_name}"
-        else:
-            tag = child_name
-        return etree.Element(tag)
-
-    def _local_name(self, tag: str) -> str:
-        return tag.split("}", 1)[-1]
-
-    def _show_fixed_xml_window(self, fixed_xml: str, status: str) -> None:
         win = tk.Toplevel(self.root)
-        win.title("Fixed XML (ready to save)")
-        win.geometry("900x600")
+        win.title("XML Error Details")
+        win.geometry("1200x700")
 
-        tk.Label(win, text=status, anchor="w").pack(fill=tk.X, padx=12, pady=(12, 6))
+        paned = tk.PanedWindow(win, orient=tk.HORIZONTAL, sashrelief=tk.RAISED)
+        paned.pack(fill=tk.BOTH, expand=True)
 
-        text = tk.Text(win, wrap=tk.NONE, font=("Consolas", 10))
-        text.pack(fill=tk.BOTH, expand=True, padx=12, pady=6)
-        text.insert("1.0", fixed_xml)
+        left = tk.Frame(paned)
+        right = tk.Frame(paned, width=380)
+        paned.add(left, stretch="always")
+        paned.add(right)
 
-        button_frame = tk.Frame(win)
-        button_frame.pack(fill=tk.X, padx=12, pady=(0, 12))
+        tk.Label(left, text="XML (editable)", anchor="w").pack(fill=tk.X, padx=8, pady=(8, 2))
+        xml_editor = tk.Text(left, wrap=tk.NONE, font=("Consolas", 10), undo=True)
+        xml_editor.pack(fill=tk.BOTH, expand=True, padx=8, pady=(0, 8))
+        xml_editor.insert("1.0", xml_text)
 
-        def save_fixed_xml() -> None:
+        xml_scroll_y = tk.Scrollbar(left, command=xml_editor.yview)
+        xml_scroll_y.place(relx=1.0, rely=0.0, relheight=1.0, anchor="ne")
+        xml_editor.configure(yscrollcommand=xml_scroll_y.set)
+
+        tk.Label(right, text="Errors", anchor="w", font=("Segoe UI", 10, "bold")).pack(fill=tk.X, padx=8, pady=(8, 2))
+        error_list = tk.Listbox(right)
+        error_list.pack(fill=tk.BOTH, expand=True, padx=8, pady=(0, 8))
+
+        tk.Label(right, text="Selected error details", anchor="w", font=("Segoe UI", 10, "bold")).pack(fill=tk.X, padx=8)
+        details_panel = tk.Text(right, wrap=tk.WORD, height=8, font=("Consolas", 10))
+        details_panel.pack(fill=tk.BOTH, padx=8, pady=(2, 8))
+        details_panel.config(state=tk.DISABLED)
+
+        for idx, err in enumerate(self.last_error_entries, 1):
+            error_list.insert(
+                tk.END,
+                f"{idx}. Line {err['line']}, Col {err['column']} - {str(err['message'])[:70]}",
+            )
+
+        xml_editor.tag_configure("error_line", background="#ffe7e7")
+        xml_editor.tag_remove("error_line", "1.0", tk.END)
+
+        def on_select(_event=None) -> None:
+            selected = error_list.curselection()
+            if not selected:
+                return
+
+            err = self.last_error_entries[selected[0]]
+            line = int(err["line"])
+
+            xml_editor.tag_remove("error_line", "1.0", tk.END)
+            start = f"{line}.0"
+            end = f"{line}.0 lineend"
+            xml_editor.tag_add("error_line", start, end)
+            xml_editor.see(start)
+
+            details_panel.config(state=tk.NORMAL)
+            details_panel.delete("1.0", tk.END)
+            details_panel.insert(
+                tk.END,
+                "\n".join(
+                    [
+                        f"Line: {err['line']}",
+                        f"Column: {err['column']}",
+                        f"Domain: {err['domain']}",
+                        f"Type: {err['type']}",
+                        f"Message: {err['message']}",
+                    ]
+                ),
+            )
+            details_panel.config(state=tk.DISABLED)
+
+        error_list.bind("<<ListboxSelect>>", on_select)
+
+        buttons = tk.Frame(win)
+        buttons.pack(fill=tk.X, padx=8, pady=(0, 8))
+
+        def save_edited_xml() -> None:
             target = filedialog.asksaveasfilename(
-                title="Save fixed XML",
+                title="Save edited XML",
                 defaultextension=".xml",
                 filetypes=[("XML files", "*.xml"), ("All files", "*.*")],
             )
             if not target:
                 return
-            Path(target).write_text(text.get("1.0", tk.END), encoding="utf-8")
-            messagebox.showinfo("Saved", f"Fixed XML saved to:\n{target}")
+            Path(target).write_text(xml_editor.get("1.0", tk.END), encoding="utf-8")
+            messagebox.showinfo("Saved", f"Edited XML saved to:\n{target}")
 
-        tk.Button(button_frame, text="Save", command=save_fixed_xml, padx=16, pady=6).pack(side=tk.RIGHT)
+        tk.Button(buttons, text="Save edited XML", command=save_edited_xml, padx=16, pady=6).pack(side=tk.RIGHT)
+
+        if self.last_error_entries:
+            error_list.selection_set(0)
+            on_select()
 
     def _write(self, text: str) -> None:
         self.output.insert(tk.END, text)
