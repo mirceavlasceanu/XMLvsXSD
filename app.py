@@ -4,7 +4,7 @@ from pathlib import Path
 
 from lxml import etree
 
-APP_VERSION = "1.0.3"
+APP_VERSION = "1.0.4"
 
 
 class XMLXSDValidatorApp:
@@ -72,7 +72,7 @@ class XMLXSDValidatorApp:
 
         self.watermark = tk.Label(
             self.output,
-            text="Mircea",
+            text="Kasia",
             font=("Segoe UI", 48, "bold"),
             fg="#d0d0d0",
             bg=self.output.cget("bg"),
