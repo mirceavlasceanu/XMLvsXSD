@@ -55,12 +55,27 @@ class XMLXSDValidatorApp:
 
         tk.Label(container, text="Validation output:", anchor="w").pack(anchor="w")
 
-        self.output = tk.Text(container, wrap=tk.WORD, font=("Consolas", 10))
-        self.output.pack(fill=tk.BOTH, expand=True, pady=(6, 0))
+        output_frame = tk.Frame(container)
+        output_frame.pack(fill=tk.BOTH, expand=True, pady=(6, 0))
 
-        scrollbar = tk.Scrollbar(self.output, command=self.output.yview)
+        self.watermark = tk.Label(
+            output_frame,
+            text="Mircea",
+            font=("Segoe UI", 56, "bold"),
+            fg="#d8d8d8",
+        )
+        self.watermark.place(relx=0.5, rely=0.5, anchor="center")
+
+        self.output = tk.Text(output_frame, wrap=tk.WORD, font=("Consolas", 10))
+        self.output.pack(fill=tk.BOTH, expand=True)
+        self.output.bind("<KeyRelease>", self._toggle_watermark)
+        self.output.bind("<<Modified>>", self._toggle_watermark)
+
+        scrollbar = tk.Scrollbar(output_frame, command=self.output.yview)
         self.output.configure(yscrollcommand=scrollbar.set)
         scrollbar.pack(side=tk.RIGHT, fill=tk.Y)
+
+        self._toggle_watermark()
 
     def select_xsd(self) -> None:
         path = filedialog.askopenfilename(
@@ -115,6 +130,14 @@ class XMLXSDValidatorApp:
     def _write(self, text: str) -> None:
         self.output.insert(tk.END, text)
         self.output.see(tk.END)
+        self._toggle_watermark()
+
+    def _toggle_watermark(self, _event=None) -> None:
+        has_content = self.output.get("1.0", tk.END).strip() != ""
+        if has_content:
+            self.watermark.place_forget()
+        else:
+            self.watermark.place(relx=0.5, rely=0.5, anchor="center")
 
 
 def main() -> None:
