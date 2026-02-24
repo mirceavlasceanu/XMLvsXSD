@@ -6,7 +6,7 @@ from tkinter import filedialog, messagebox
 
 from lxml import etree
 
-APP_VERSION = "1.3.0"
+APP_VERSION = "1.3.1"
 
 DATE_PATTERNS = [
     re.compile(r"^\d{4}-\d{2}-\d{2}$"),
@@ -84,6 +84,15 @@ class XMLXSDValidatorApp:
 
         self._toggle_watermark()
 
+    def _show_warning(self, title: str, text: str, parent: tk.Misc | None = None) -> None:
+        messagebox.showwarning(title, text, parent=parent or self.root)
+
+    def _show_info(self, title: str, text: str, parent: tk.Misc | None = None) -> None:
+        messagebox.showinfo(title, text, parent=parent or self.root)
+
+    def _show_error(self, title: str, text: str, parent: tk.Misc | None = None) -> None:
+        messagebox.showerror(title, text, parent=parent or self.root)
+
     def select_xsd(self) -> None:
         path = filedialog.askopenfilename(title="Select XSD Schema", filetypes=[("XSD files", "*.xsd"), ("All files", "*.*")])
         if path:
@@ -103,7 +112,7 @@ class XMLXSDValidatorApp:
         self.last_error_entries = []
 
         if not self.xsd_path or not self.xml_path:
-            messagebox.showwarning("Missing files", "Please select both XSD and XML files.")
+            self._show_warning("Missing files", "Please select both XSD and XML files.")
             return
 
         try:
@@ -146,7 +155,7 @@ class XMLXSDValidatorApp:
 
     def show_details(self) -> None:
         if not self.xml_path or not self.last_error_entries:
-            messagebox.showwarning("No details", "Run validation first and make sure there are errors.")
+            self._show_warning("No details", "Run validation first and make sure there are errors.")
             return
 
         xml_text = self.xml_path.read_text(encoding="utf-8", errors="replace")
@@ -204,7 +213,7 @@ class XMLXSDValidatorApp:
 
     def open_anonymize_window(self) -> None:
         if not self.xml_path:
-            messagebox.showwarning("Missing XML", "Please select an XML file first.")
+            self._show_warning("Missing XML", "Please select an XML file first.")
             return
 
         xml_text = self.xml_path.read_text(encoding="utf-8", errors="replace")
@@ -213,16 +222,79 @@ class XMLXSDValidatorApp:
         win.title("Anonymize XML")
         win.geometry("1200x750")
 
+        selected_lines: set[int] = set()
+
         top_controls = tk.Frame(win)
         top_controls.pack(fill=tk.X, padx=8, pady=(8, 4))
+        tk.Label(top_controls, text="Click line markers (☐/☑) to select multiple lines for anonymization.", anchor="w").pack(side=tk.LEFT)
 
-        tk.Label(top_controls, text="Choose anonymization mode:", anchor="w").pack(side=tk.LEFT)
+        editor_frame = tk.Frame(win)
+        editor_frame.pack(fill=tk.BOTH, expand=True, padx=8, pady=4)
 
-        editor = tk.Text(win, wrap=tk.NONE, font=("Consolas", 10), undo=True)
-        editor.pack(fill=tk.BOTH, expand=True, padx=8, pady=4)
+        gutter = tk.Text(editor_frame, width=8, wrap=tk.NONE, font=("Consolas", 10), state=tk.DISABLED, bg="#f4f4f4")
+        gutter.pack(side=tk.LEFT, fill=tk.Y)
+
+        editor = tk.Text(editor_frame, wrap=tk.NONE, font=("Consolas", 10), undo=True)
+        editor.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
         editor.insert("1.0", xml_text)
 
+        scrollbar = tk.Scrollbar(editor_frame)
+        scrollbar.pack(side=tk.RIGHT, fill=tk.Y)
+
+        def yscroll_command(*args):
+            editor.yview(*args)
+            gutter.yview(*args)
+
+        def on_editor_scroll(first: str, last: str):
+            scrollbar.set(first, last)
+            gutter.yview_moveto(first)
+
+        editor.configure(yscrollcommand=on_editor_scroll)
+        gutter.configure(yscrollcommand=lambda first, last: None)
+        scrollbar.configure(command=yscroll_command)
+
         editor.tag_configure("selected_lines", background="#fff4cc")
+        gutter.tag_configure("selected_lines", background="#ffe59f")
+
+        def render_gutter() -> None:
+            line_count = int(editor.index("end-1c").split(".")[0])
+            gutter.config(state=tk.NORMAL)
+            gutter.delete("1.0", tk.END)
+            for line_no in range(1, line_count + 1):
+                mark = "☑" if line_no in selected_lines else "☐"
+                gutter.insert(tk.END, f"{mark} {line_no}\n")
+            gutter.config(state=tk.DISABLED)
+            refresh_highlights()
+
+        def refresh_highlights() -> None:
+            editor.tag_remove("selected_lines", "1.0", tk.END)
+            gutter.tag_remove("selected_lines", "1.0", tk.END)
+            for line_no in selected_lines:
+                editor.tag_add("selected_lines", f"{line_no}.0", f"{line_no}.0 lineend")
+                gutter.tag_add("selected_lines", f"{line_no}.0", f"{line_no}.0 lineend")
+
+        def toggle_line(event) -> str:
+            index = gutter.index(f"@{event.x},{event.y}")
+            line_no = int(index.split(".")[0])
+            if line_no in selected_lines:
+                selected_lines.remove(line_no)
+            else:
+                selected_lines.add(line_no)
+            render_gutter()
+            return "break"
+
+        def clear_invalid_selected_lines() -> None:
+            max_line = int(editor.index("end-1c").split(".")[0])
+            selected_lines.intersection_update(set(range(1, max_line + 1)))
+
+        def on_editor_key_release(_event=None) -> None:
+            clear_invalid_selected_lines()
+            render_gutter()
+
+        gutter.bind("<Button-1>", toggle_line)
+        editor.bind("<KeyRelease>", on_editor_key_release)
+
+        render_gutter()
 
         bottom_controls = tk.Frame(win)
         bottom_controls.pack(fill=tk.X, padx=8, pady=(4, 8))
@@ -235,52 +307,46 @@ class XMLXSDValidatorApp:
             updated = etree.tostring(tree, pretty_print=True, encoding="utf-8", xml_declaration=True).decode("utf-8")
             editor.delete("1.0", tk.END)
             editor.insert("1.0", updated)
-            editor.tag_remove("selected_lines", "1.0", tk.END)
+            selected_lines.clear()
+            render_gutter()
 
         def anonymize_all() -> None:
             try:
                 tree = parse_editor_xml()
                 self._anonymize_tree(tree)
                 refresh_editor(tree)
-                messagebox.showinfo("Anonymized", "All eligible values were anonymized (dates preserved).")
+                self._show_info("Anonymized", "All eligible values were anonymized (dates preserved).", parent=win)
             except Exception as exc:
-                messagebox.showerror("Anonymize failed", f"Could not anonymize XML:\n{exc}")
+                self._show_error("Anonymize failed", f"Could not anonymize XML:\n{exc}", parent=win)
 
         def anonymize_selected_lines() -> None:
             try:
-                if not editor.tag_ranges(tk.SEL):
-                    messagebox.showwarning("No selection", "Select one or more lines in the XML editor first.")
+                if not selected_lines:
+                    self._show_warning("No lines selected", "Tick one or more lines in the left marker column first.", parent=win)
                     return
-
-                start_line = int(str(editor.index("sel.first")).split(".")[0])
-                end_line = int(str(editor.index("sel.last")).split(".")[0])
-                selected_lines = set(range(start_line, end_line + 1))
-
-                editor.tag_remove("selected_lines", "1.0", tk.END)
-                for ln in selected_lines:
-                    editor.tag_add("selected_lines", f"{ln}.0", f"{ln}.0 lineend")
 
                 tree = parse_editor_xml()
                 changed = self._anonymize_tree(tree, target_lines=selected_lines)
                 refresh_editor(tree)
 
                 if changed == 0:
-                    messagebox.showinfo("No changes", "No values matched selected lines for anonymization.")
+                    self._show_info("No changes", "No values matched selected lines for anonymization.", parent=win)
                 else:
-                    messagebox.showinfo("Anonymized", f"Anonymized values for selected lines. Updated fields: {changed}.")
+                    self._show_info("Anonymized", f"Anonymized values for selected lines. Updated fields: {changed}.", parent=win)
             except Exception as exc:
-                messagebox.showerror("Anonymize failed", f"Could not anonymize selected lines:\n{exc}")
+                self._show_error("Anonymize failed", f"Could not anonymize selected lines:\n{exc}", parent=win)
 
         def save_anonymized() -> None:
             target = filedialog.asksaveasfilename(
                 title="Save anonymized XML",
                 defaultextension=".xml",
                 filetypes=[("XML files", "*.xml"), ("All files", "*.*")],
+                parent=win,
             )
             if not target:
                 return
             Path(target).write_text(editor.get("1.0", tk.END), encoding="utf-8")
-            messagebox.showinfo("Saved", f"Anonymized XML saved to:\n{target}")
+            self._show_info("Saved", f"Anonymized XML saved to:\n{target}", parent=win)
 
         tk.Button(bottom_controls, text="Anonymize all", command=anonymize_all, padx=16, pady=6).pack(side=tk.LEFT)
         tk.Button(bottom_controls, text="Anonymize selected lines", command=anonymize_selected_lines, padx=16, pady=6).pack(side=tk.LEFT, padx=(8, 0))

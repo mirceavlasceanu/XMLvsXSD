@@ -64,6 +64,6 @@ The **Show details** button opens a split window:
 
 The **Anonymize** window provides two options:
 - **Anonymize all**: anonymizes all eligible data values in XML text/attributes while keeping XML structure intact and preserving date values.
-- **Anonymize selected lines**: select lines in the editor and anonymize only values on elements sourced from those selected lines.
+- **Anonymize selected lines**: use line markers (☐/☑) at the beginning of lines to select multiple lines; selected lines are highlighted before anonymization.
 
 Both modes allow saving the anonymized XML to a new file.
