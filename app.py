@@ -2,11 +2,19 @@ import hashlib
 import re
 import tkinter as tk
 from pathlib import Path
-from tkinter import filedialog, messagebox
+from tkinter import filedialog, messagebox, ttk
 
 from lxml import etree
 
-APP_VERSION = "1.3.2"
+APP_VERSION = "1.4.2"
+
+BG_COLOR = "#eef3f9"
+CARD_COLOR = "#ffffff"
+BORDER_COLOR = "#cfdae8"
+TEXT_PRIMARY = "#1e293b"
+TEXT_MUTED = "#64748b"
+ACCENT = "#2563eb"
+ACCENT_ACTIVE = "#1d4ed8"
 
 DATE_PATTERNS = [
     re.compile(r"^\d{4}-\d{2}-\d{2}$"),
@@ -16,71 +24,143 @@ DATE_PATTERNS = [
     re.compile(r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}(:\d{2})?(Z|[+\-]\d{2}:\d{2})?$"),
 ]
 
+EXPECTED_ELEMENT_RE = re.compile(r"Expected is \( ([^)]+) \)\.?")
+NOT_ALLOWED_ATTR_RE = re.compile(r"The attribute '([^']+)' is not allowed\.?")
+MISSING_ATTR_RE = re.compile(r"The attribute '([^']+)' is required but missing\.?")
+INVALID_TYPE_RE = re.compile(r"is not a valid value of the atomic type '([^']+)'\.?")
+PATTERN_FACET_RE = re.compile(r"\[facet 'pattern'\]")
+ENUM_FACET_RE = re.compile(r"\[facet 'enumeration'\]")
+
 
 class XMLXSDValidatorApp:
     def __init__(self, root: tk.Tk) -> None:
         self.root = root
         self.root.title(f"XML vs XSD Validator v{APP_VERSION}")
-        self.root.geometry("900x600")
+        self.root.geometry("1024x700")
+        self.root.minsize(900, 620)
 
         self.xsd_path: Path | None = None
         self.xml_path: Path | None = None
         self.last_error_entries: list[dict[str, str | int]] = []
+        self.status_var = tk.StringVar(value="Select both files to start validation.")
+        self.style = ttk.Style(self.root)
 
+        self._configure_theme()
         self._build_ui()
 
+    def _configure_theme(self) -> None:
+        self.root.configure(bg=BG_COLOR)
+        self.style.theme_use("clam")
+
+        self.style.configure("App.TFrame", background=BG_COLOR)
+        self.style.configure("Card.TFrame", background=CARD_COLOR, relief=tk.SOLID, borderwidth=1)
+        self.style.configure("CardInner.TFrame", background=CARD_COLOR)
+
+        self.style.configure("Title.TLabel", background=BG_COLOR, foreground=TEXT_PRIMARY, font=("Segoe UI Semibold", 20))
+        self.style.configure("Subtitle.TLabel", background=BG_COLOR, foreground=TEXT_MUTED, font=("Segoe UI", 10))
+        self.style.configure("Section.TLabel", background=CARD_COLOR, foreground=TEXT_PRIMARY, font=("Segoe UI Semibold", 11))
+        self.style.configure("Field.TLabel", background=CARD_COLOR, foreground=TEXT_PRIMARY, font=("Segoe UI", 10))
+        self.style.configure("Path.TLabel", background=CARD_COLOR, foreground=TEXT_MUTED, font=("Segoe UI", 10))
+        self.style.configure("Status.TLabel", background=BG_COLOR, foreground=TEXT_PRIMARY, font=("Segoe UI Semibold", 10))
+        self.style.configure("Hint.TLabel", background=BG_COLOR, foreground=TEXT_MUTED, font=("Segoe UI", 9))
+
+        self.style.configure("Primary.TButton", font=("Segoe UI Semibold", 10), padding=(14, 8), foreground="#ffffff", background=ACCENT)
+        self.style.map("Primary.TButton", background=[("active", ACCENT_ACTIVE), ("pressed", ACCENT_ACTIVE)])
+
+        self.style.configure("Secondary.TButton", font=("Segoe UI", 10), padding=(12, 8))
+        self.style.configure("Ghost.TButton", font=("Segoe UI", 10), padding=(12, 8))
+
+        self.style.configure(
+            "Horizontal.TProgressbar",
+            troughcolor="#dce6f3",
+            background=ACCENT,
+            bordercolor="#dce6f3",
+            lightcolor=ACCENT,
+            darkcolor=ACCENT,
+        )
+
     def _build_ui(self) -> None:
-        container = tk.Frame(self.root, padx=12, pady=12)
+        container = ttk.Frame(self.root, style="App.TFrame", padding=20)
         container.pack(fill=tk.BOTH, expand=True)
+        container.columnconfigure(0, weight=1)
+        container.rowconfigure(3, weight=1)
 
-        tk.Label(container, text="Validate XML against XSD", font=("Segoe UI", 16, "bold")).pack(anchor="w", pady=(0, 12))
-        tk.Label(container, text=f"Version: {APP_VERSION}", fg="#666666", font=("Segoe UI", 9)).pack(anchor="w", pady=(0, 10))
+        header = ttk.Frame(container, style="App.TFrame")
+        header.grid(row=0, column=0, sticky="ew", pady=(0, 14))
+        header.columnconfigure(0, weight=1)
+        ttk.Label(header, text="XML vs XSD Validator", style="Title.TLabel").grid(row=0, column=0, sticky="w")
+        ttk.Label(header, text=f"Version {APP_VERSION}", style="Subtitle.TLabel").grid(row=1, column=0, sticky="w", pady=(2, 0))
 
-        xsd_frame = tk.Frame(container)
-        xsd_frame.pack(fill=tk.X, pady=4)
-        tk.Label(xsd_frame, text="XSD file:", width=12, anchor="w").pack(side=tk.LEFT)
-        self.xsd_label = tk.Label(xsd_frame, text="No file selected", anchor="w")
-        self.xsd_label.pack(side=tk.LEFT, fill=tk.X, expand=True, padx=(0, 8))
-        tk.Button(xsd_frame, text="Browse XSD", command=self.select_xsd).pack(side=tk.RIGHT)
+        select_card = ttk.Frame(container, style="Card.TFrame", padding=14)
+        select_card.grid(row=1, column=0, sticky="ew")
+        select_card.columnconfigure(1, weight=1)
 
-        xml_frame = tk.Frame(container)
-        xml_frame.pack(fill=tk.X, pady=4)
-        tk.Label(xml_frame, text="XML file:", width=12, anchor="w").pack(side=tk.LEFT)
-        self.xml_label = tk.Label(xml_frame, text="No file selected", anchor="w")
-        self.xml_label.pack(side=tk.LEFT, fill=tk.X, expand=True, padx=(0, 8))
-        tk.Button(xml_frame, text="Browse XML", command=self.select_xml).pack(side=tk.RIGHT)
+        ttk.Label(select_card, text="Files", style="Section.TLabel").grid(row=0, column=0, columnspan=3, sticky="w", pady=(0, 10))
 
-        controls = tk.Frame(container)
-        controls.pack(anchor="w", pady=12)
+        ttk.Label(select_card, text="XSD schema", style="Field.TLabel", width=12).grid(row=1, column=0, sticky="w", padx=(0, 10), pady=4)
+        self.xsd_label = ttk.Label(select_card, text="No file selected", style="Path.TLabel")
+        self.xsd_label.grid(row=1, column=1, sticky="ew", pady=4)
+        ttk.Button(select_card, text="Browse", command=self.select_xsd, style="Secondary.TButton").grid(row=1, column=2, padx=(10, 0), pady=4)
 
-        tk.Button(controls, text="Validate", command=self.validate, bg="#0d6efd", fg="white", padx=16, pady=6).pack(side=tk.LEFT)
+        ttk.Label(select_card, text="XML file", style="Field.TLabel", width=12).grid(row=2, column=0, sticky="w", padx=(0, 10), pady=4)
+        self.xml_label = ttk.Label(select_card, text="No file selected", style="Path.TLabel")
+        self.xml_label.grid(row=2, column=1, sticky="ew", pady=4)
+        ttk.Button(select_card, text="Browse", command=self.select_xml, style="Secondary.TButton").grid(row=2, column=2, padx=(10, 0), pady=4)
 
-        self.details_button = tk.Button(controls, text="Show details", command=self.show_details, state=tk.DISABLED, padx=16, pady=6)
-        self.details_button.pack(side=tk.LEFT, padx=(8, 0))
+        controls = ttk.Frame(container, style="App.TFrame")
+        controls.grid(row=2, column=0, sticky="ew", pady=12)
+        controls.columnconfigure(5, weight=1)
+        ttk.Button(controls, text="Validate", command=self.validate, style="Primary.TButton").grid(row=0, column=0, sticky="w")
+        ttk.Button(controls, text="Bulk validate", command=self.bulk_validate, style="Secondary.TButton").grid(row=0, column=1, sticky="w", padx=(8, 0))
 
-        self.anonymize_button = tk.Button(controls, text="Anonymize", command=self.open_anonymize_window, state=tk.NORMAL, padx=16, pady=6)
-        self.anonymize_button.pack(side=tk.LEFT, padx=(8, 0))
+        self.details_button = ttk.Button(controls, text="Show details", command=self.show_details, state=tk.DISABLED, style="Secondary.TButton")
+        self.details_button.grid(row=0, column=2, sticky="w", padx=(8, 0))
 
-        tk.Label(container, text="Validation output:", anchor="w").pack(anchor="w")
+        self.anonymize_button = ttk.Button(controls, text="Anonymize XML", command=self.open_anonymize_window, style="Ghost.TButton")
+        self.anonymize_button.grid(row=0, column=3, sticky="w", padx=(8, 0))
 
-        output_frame = tk.Frame(container)
-        output_frame.pack(fill=tk.BOTH, expand=True, pady=(6, 0))
+        ttk.Label(controls, textvariable=self.status_var, style="Status.TLabel").grid(row=0, column=5, sticky="e")
 
-        self.output = tk.Text(output_frame, wrap=tk.WORD, font=("Consolas", 10))
-        self.output.pack(fill=tk.BOTH, expand=True)
+        output_card = ttk.Frame(container, style="Card.TFrame", padding=1)
+        output_card.grid(row=3, column=0, sticky="nsew")
+        output_card.rowconfigure(1, weight=1)
+        output_card.columnconfigure(0, weight=1)
+
+        top_bar = ttk.Frame(output_card, style="CardInner.TFrame")
+        top_bar.grid(row=0, column=0, sticky="ew")
+        ttk.Label(top_bar, text="Validation output", style="Section.TLabel").pack(side=tk.LEFT, padx=12, pady=(10, 8))
+        ttk.Label(top_bar, text="Monospace stream", style="Hint.TLabel").pack(side=tk.RIGHT, padx=12, pady=(10, 8))
+
+        output_frame = ttk.Frame(output_card, style="CardInner.TFrame")
+        output_frame.grid(row=1, column=0, sticky="nsew", padx=10, pady=(0, 10))
+        output_frame.rowconfigure(0, weight=1)
+        output_frame.columnconfigure(0, weight=1)
+
+        self.output = tk.Text(
+            output_frame,
+            wrap=tk.WORD,
+            font=("Cascadia Mono", 10),
+            bg="#f8fbff",
+            fg="#0f172a",
+            insertbackground="#0f172a",
+            relief=tk.FLAT,
+            padx=12,
+            pady=10,
+        )
+        self.output.grid(row=0, column=0, sticky="nsew")
 
         self.watermark = tk.Label(
             self.output,
             text="XML vs XSD",
-            font=("Segoe UI", 44, "bold"),
-            fg="#d0d0d0",
+            font=("Segoe UI Semibold", 42),
+            fg="#d6e0ee",
             bg=self.output.cget("bg"),
         )
         self.watermark.place(relx=0.5, rely=0.5, anchor="center")
 
-        scrollbar = tk.Scrollbar(output_frame, command=self.output.yview)
+        scrollbar = ttk.Scrollbar(output_frame, command=self.output.yview)
         self.output.configure(yscrollcommand=scrollbar.set)
-        scrollbar.pack(side=tk.RIGHT, fill=tk.Y)
+        scrollbar.grid(row=0, column=1, sticky="ns")
 
         self._toggle_watermark()
 
@@ -98,12 +178,14 @@ class XMLXSDValidatorApp:
         if path:
             self.xsd_path = Path(path)
             self.xsd_label.config(text=str(self.xsd_path))
+            self.status_var.set("XSD selected. Choose XML file next.")
 
     def select_xml(self) -> None:
         path = filedialog.askopenfilename(title="Select XML File", filetypes=[("XML files", "*.xml"), ("All files", "*.*")])
         if path:
             self.xml_path = Path(path)
             self.xml_label.config(text=str(self.xml_path))
+            self.status_var.set("XML selected. Ready to validate.")
 
     def validate(self) -> None:
         self.output.delete("1.0", tk.END)
@@ -113,18 +195,21 @@ class XMLXSDValidatorApp:
 
         if not self.xsd_path or not self.xml_path:
             self._show_warning("Missing files", "Please select both XSD and XML files.")
+            self.status_var.set("Select both files before validation.")
             return
 
         try:
             schema = etree.XMLSchema(etree.parse(str(self.xsd_path)))
         except (etree.XMLSyntaxError, etree.XMLSchemaParseError, OSError) as exc:
             self._write(f"XSD could not be loaded:\n{exc}\n")
+            self.status_var.set("XSD parse failed.")
             return
 
         try:
             xml_doc = etree.parse(str(self.xml_path))
         except (etree.XMLSyntaxError, OSError) as exc:
             self._write(f"XML could not be loaded:\n{exc}\n")
+            self.status_var.set("XML parse failed.")
             if isinstance(exc, etree.XMLSyntaxError):
                 self.last_error_entries = [{
                     "line": exc.lineno or 1,
@@ -132,15 +217,18 @@ class XMLXSDValidatorApp:
                     "message": str(exc),
                     "domain": "XMLSyntax",
                     "type": "XMLSyntaxError",
+                    "hint": self._build_hint(str(exc), "XMLSyntax", "XMLSyntaxError"),
                 }]
                 self.details_button.config(state=tk.NORMAL)
             return
 
         if schema.validate(xml_doc):
             self._write("✅ XML is valid against the selected XSD.\n")
+            self.status_var.set("Validation passed.")
             return
 
         self._write("❌ XML is NOT valid. Errors:\n\n")
+        self.status_var.set("Validation failed. Review error details.")
         for entry in schema.error_log:
             self.last_error_entries.append({
                 "line": entry.line,
@@ -148,10 +236,77 @@ class XMLXSDValidatorApp:
                 "message": entry.message,
                 "domain": entry.domain_name,
                 "type": entry.type_name,
+                "hint": self._build_hint(entry.message, entry.domain_name, entry.type_name),
             })
             self._write(f"Line {entry.line}, Column {entry.column}: {entry.message} (Domain: {entry.domain_name}, Type: {entry.type_name})\n")
 
         self.details_button.config(state=tk.NORMAL)
+
+    def bulk_validate(self) -> None:
+        self.output.delete("1.0", tk.END)
+        self._toggle_watermark()
+        self.details_button.config(state=tk.DISABLED)
+        self.last_error_entries = []
+
+        if not self.xsd_path:
+            self._show_warning("Missing XSD", "Please select an XSD schema first.")
+            self.status_var.set("Select XSD before bulk validation.")
+            return
+
+        xml_paths = filedialog.askopenfilenames(
+            title="Select XML files for bulk validation",
+            filetypes=[("XML files", "*.xml"), ("All files", "*.*")],
+        )
+        if not xml_paths:
+            self.status_var.set("Bulk validation canceled.")
+            return
+
+        try:
+            schema = etree.XMLSchema(etree.parse(str(self.xsd_path)))
+        except (etree.XMLSyntaxError, etree.XMLSchemaParseError, OSError) as exc:
+            self._write(f"XSD could not be loaded:\n{exc}\n")
+            self.status_var.set("XSD parse failed.")
+            return
+
+        total = len(xml_paths)
+        passed = 0
+        failed = 0
+        parse_failed = 0
+
+        self._write(f"Bulk validation started. Files: {total}\n")
+        self._write(f"Schema: {self.xsd_path}\n\n")
+
+        for raw_path in xml_paths:
+            path = Path(raw_path)
+            try:
+                xml_doc = etree.parse(str(path))
+            except (etree.XMLSyntaxError, OSError) as exc:
+                parse_failed += 1
+                self._write(f"[ERROR] {path}\n")
+                self._write(f"  Could not load XML: {exc}\n\n")
+                continue
+
+            if schema.validate(xml_doc):
+                passed += 1
+                self._write(f"[PASS]  {path}\n")
+                continue
+
+            failed += 1
+            self._write(f"[FAIL]  {path}\n")
+            for entry in schema.error_log:
+                self._write(f"  Line {entry.line}, Column {entry.column}: {entry.message}\n")
+            self._write("\n")
+
+        self._write("Summary:\n")
+        self._write(f"  Total: {total}\n")
+        self._write(f"  Passed: {passed}\n")
+        self._write(f"  Failed: {failed}\n")
+        self._write(f"  Parse errors: {parse_failed}\n")
+
+        if failed == 0 and parse_failed == 0:
+            self.status_var.set(f"Bulk validation passed for all {total} files.")
+        else:
+            self.status_var.set(f"Bulk validation done. Passed: {passed}, failed: {failed}, parse errors: {parse_failed}.")
 
     def show_details(self) -> None:
         if not self.xml_path or not self.last_error_entries:
@@ -162,27 +317,69 @@ class XMLXSDValidatorApp:
         win = tk.Toplevel(self.root)
         win.title("XML Error Details")
         win.geometry("1200x700")
+        win.configure(bg=BG_COLOR)
 
-        paned = tk.PanedWindow(win, orient=tk.HORIZONTAL, sashrelief=tk.RAISED)
+        paned = ttk.Panedwindow(win, orient=tk.HORIZONTAL)
         paned.pack(fill=tk.BOTH, expand=True)
 
-        left = tk.Frame(paned)
-        right = tk.Frame(paned, width=380)
-        paned.add(left, stretch="always")
-        paned.add(right)
+        left = ttk.Frame(paned, style="App.TFrame")
+        right = ttk.Frame(paned, style="Card.TFrame", padding=8)
+        paned.add(left, weight=4)
+        paned.add(right, weight=2)
 
-        tk.Label(left, text="XML (editable)", anchor="w").pack(fill=tk.X, padx=8, pady=(8, 2))
-        xml_editor = tk.Text(left, wrap=tk.NONE, font=("Consolas", 10), undo=True)
+        ttk.Label(left, text="XML (editable)", style="Section.TLabel").pack(fill=tk.X, padx=8, pady=(8, 4))
+        xml_editor = tk.Text(
+            left,
+            wrap=tk.NONE,
+            font=("Cascadia Mono", 10),
+            undo=True,
+            bg="#f8fbff",
+            fg="#0f172a",
+            insertbackground="#0f172a",
+            relief=tk.FLAT,
+            padx=10,
+            pady=8,
+        )
         xml_editor.pack(fill=tk.BOTH, expand=True, padx=8, pady=(0, 8))
         xml_editor.insert("1.0", xml_text)
 
-        tk.Label(right, text="Errors", anchor="w", font=("Segoe UI", 10, "bold")).pack(fill=tk.X, padx=8, pady=(8, 2))
-        error_list = tk.Listbox(right)
-        error_list.pack(fill=tk.BOTH, expand=True, padx=8, pady=(0, 8))
+        ttk.Label(right, text="Drag the divider to resize sections", style="Hint.TLabel").pack(fill=tk.X, pady=(2, 6))
 
-        tk.Label(right, text="Selected error details", anchor="w", font=("Segoe UI", 10, "bold")).pack(fill=tk.X, padx=8)
-        details_panel = tk.Text(right, wrap=tk.WORD, height=8, font=("Consolas", 10), state=tk.DISABLED)
-        details_panel.pack(fill=tk.BOTH, padx=8, pady=(2, 8))
+        right_split = ttk.Panedwindow(right, orient=tk.VERTICAL)
+        right_split.pack(fill=tk.BOTH, expand=True)
+
+        errors_frame = ttk.Frame(right, style="CardInner.TFrame", padding=2)
+        details_frame = ttk.Frame(right, style="CardInner.TFrame", padding=2)
+        right_split.add(errors_frame, weight=3)
+        right_split.add(details_frame, weight=2)
+
+        ttk.Label(errors_frame, text="Errors", style="Section.TLabel").pack(fill=tk.X, pady=(2, 4))
+        error_list = tk.Listbox(
+            errors_frame,
+            bg="#f8fafc",
+            fg=TEXT_PRIMARY,
+            relief=tk.FLAT,
+            highlightthickness=1,
+            highlightbackground=BORDER_COLOR,
+            selectbackground="#cfe8ff",
+            font=("Segoe UI", 10),
+        )
+        error_list.pack(fill=tk.BOTH, expand=True, pady=(0, 4))
+
+        ttk.Label(details_frame, text="Selected error details", style="Section.TLabel").pack(fill=tk.X, pady=(2, 4))
+        details_panel = tk.Text(
+            details_frame,
+            wrap=tk.WORD,
+            height=8,
+            font=("Cascadia Mono", 10),
+            state=tk.DISABLED,
+            relief=tk.FLAT,
+            bg="#f8fafc",
+            fg=TEXT_PRIMARY,
+            padx=8,
+            pady=8,
+        )
+        details_panel.pack(fill=tk.BOTH, expand=True, pady=(0, 2))
 
         for idx, err in enumerate(self.last_error_entries, 1):
             error_list.insert(tk.END, f"{idx}. Line {err['line']}, Col {err['column']} - {str(err['message'])[:70]}")
@@ -203,7 +400,15 @@ class XMLXSDValidatorApp:
 
             details_panel.config(state=tk.NORMAL)
             details_panel.delete("1.0", tk.END)
-            details_panel.insert(tk.END, f"Line: {err['line']}\nColumn: {err['column']}\nDomain: {err['domain']}\nType: {err['type']}\nMessage: {err['message']}")
+            details_panel.insert(
+                tk.END,
+                f"Line: {err['line']}\n"
+                f"Column: {err['column']}\n"
+                f"Domain: {err['domain']}\n"
+                f"Type: {err['type']}\n\n"
+                f"Message:\n{err['message']}\n\n"
+                f"Quick fix hint:\n{err.get('hint', 'No hint available.')}",
+            )
             details_panel.config(state=tk.DISABLED)
 
         error_list.bind("<<ListboxSelect>>", on_select)
@@ -221,24 +426,50 @@ class XMLXSDValidatorApp:
         win = tk.Toplevel(self.root)
         win.title("Anonymize XML")
         win.geometry("1200x750")
+        win.configure(bg=BG_COLOR)
 
         selected_lines: set[int] = set()
 
-        top_controls = tk.Frame(win)
+        top_controls = ttk.Frame(win, style="App.TFrame")
         top_controls.pack(fill=tk.X, padx=8, pady=(8, 4))
-        tk.Label(top_controls, text="Click line markers (☐/☑) to select multiple lines for anonymization.", anchor="w").pack(side=tk.LEFT)
+        ttk.Label(
+            top_controls,
+            text="Select lines containing tags/attributes to anonymize. Selected names are updated globally in the whole file.",
+            style="Subtitle.TLabel",
+            anchor="w",
+        ).pack(side=tk.LEFT)
 
-        editor_frame = tk.Frame(win)
+        editor_frame = ttk.Frame(win, style="Card.TFrame", padding=8)
         editor_frame.pack(fill=tk.BOTH, expand=True, padx=8, pady=4)
 
-        gutter = tk.Text(editor_frame, width=8, wrap=tk.NONE, font=("Consolas", 10), state=tk.DISABLED, bg="#f4f4f4")
+        gutter = tk.Text(
+            editor_frame,
+            width=8,
+            wrap=tk.NONE,
+            font=("Cascadia Mono", 10),
+            state=tk.DISABLED,
+            bg="#e2e8f0",
+            fg=TEXT_PRIMARY,
+            relief=tk.FLAT,
+        )
         gutter.pack(side=tk.LEFT, fill=tk.Y)
 
-        editor = tk.Text(editor_frame, wrap=tk.NONE, font=("Consolas", 10), undo=True)
+        editor = tk.Text(
+            editor_frame,
+            wrap=tk.NONE,
+            font=("Cascadia Mono", 10),
+            undo=True,
+            bg="#f8fbff",
+            fg="#0f172a",
+            insertbackground="#0f172a",
+            relief=tk.FLAT,
+            padx=10,
+            pady=8,
+        )
         editor.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
         editor.insert("1.0", xml_text)
 
-        scrollbar = tk.Scrollbar(editor_frame)
+        scrollbar = ttk.Scrollbar(editor_frame)
         scrollbar.pack(side=tk.RIGHT, fill=tk.Y)
 
         def yscroll_command(*args):
@@ -253,15 +484,15 @@ class XMLXSDValidatorApp:
         gutter.configure(yscrollcommand=lambda first, last: None)
         scrollbar.configure(command=yscroll_command)
 
-        editor.tag_configure("selected_lines", background="#fff4cc")
-        gutter.tag_configure("selected_lines", background="#ffe59f")
+        editor.tag_configure("selected_lines", background="#dbeafe")
+        gutter.tag_configure("selected_lines", background="#cbd5e1")
 
         def render_gutter() -> None:
             line_count = int(editor.index("end-1c").split(".")[0])
             gutter.config(state=tk.NORMAL)
             gutter.delete("1.0", tk.END)
             for line_no in range(1, line_count + 1):
-                mark = "☑" if line_no in selected_lines else "☐"
+                mark = "[x]" if line_no in selected_lines else "[ ]"
                 gutter.insert(tk.END, f"{mark} {line_no}\n")
             gutter.config(state=tk.DISABLED)
             refresh_highlights()
@@ -305,7 +536,7 @@ class XMLXSDValidatorApp:
 
         render_gutter()
 
-        bottom_controls = tk.Frame(win)
+        bottom_controls = ttk.Frame(win, style="App.TFrame")
         bottom_controls.pack(fill=tk.X, padx=8, pady=(4, 8))
 
         def parse_editor_xml() -> etree._ElementTree:
@@ -335,13 +566,35 @@ class XMLXSDValidatorApp:
                     return
 
                 tree = parse_editor_xml()
-                changed = self._anonymize_tree(tree, target_lines=selected_lines)
+                selected_elements, selected_attributes = self._collect_targets_from_lines(tree, selected_lines)
+                if not selected_elements and not selected_attributes:
+                    self._show_info(
+                        "No matching tags",
+                        "No element text or attributes were found on selected lines.",
+                        parent=win,
+                    )
+                    return
+
+                changed = self._anonymize_tree_by_targets(
+                    tree,
+                    target_elements=selected_elements,
+                    target_attributes=selected_attributes,
+                )
                 refresh_editor(tree)
 
                 if changed == 0:
-                    self._show_info("No changes", "No values matched selected lines for anonymization.", parent=win)
+                    self._show_info("No changes", "Selected tags/attributes were found, but no eligible values were changed.", parent=win)
                 else:
-                    self._show_info("Anonymized", f"Anonymized values for selected lines. Updated fields: {changed}.", parent=win)
+                    targets = []
+                    if selected_elements:
+                        targets.append(f"tags: {', '.join(sorted(selected_elements))}")
+                    if selected_attributes:
+                        targets.append(f"attributes: {', '.join(sorted(selected_attributes))}")
+                    self._show_info(
+                        "Anonymized",
+                        f"Updated fields: {changed}\nApplied globally for selected {', '.join(targets)}.",
+                        parent=win,
+                    )
             except Exception as exc:
                 self._show_error("Anonymize failed", f"Could not anonymize selected lines:\n{exc}", parent=win)
 
@@ -357,9 +610,9 @@ class XMLXSDValidatorApp:
             Path(target).write_text(editor.get("1.0", tk.END), encoding="utf-8")
             self._show_info("Saved", f"Anonymized XML saved to:\n{target}", parent=win)
 
-        tk.Button(bottom_controls, text="Anonymize all", command=anonymize_all, padx=16, pady=6).pack(side=tk.LEFT)
-        tk.Button(bottom_controls, text="Anonymize selected lines", command=anonymize_selected_lines, padx=16, pady=6).pack(side=tk.LEFT, padx=(8, 0))
-        tk.Button(bottom_controls, text="Save anonymized XML", command=save_anonymized, padx=16, pady=6).pack(side=tk.RIGHT)
+        ttk.Button(bottom_controls, text="Anonymize all", command=anonymize_all, style="Primary.TButton").pack(side=tk.LEFT)
+        ttk.Button(bottom_controls, text="Anonymize selected tags globally", command=anonymize_selected_lines, style="Secondary.TButton").pack(side=tk.LEFT, padx=(8, 0))
+        ttk.Button(bottom_controls, text="Save anonymized XML", command=save_anonymized, style="Secondary.TButton").pack(side=tk.RIGHT)
 
     def _is_date_value(self, value: str) -> bool:
         normalized = value.strip()
@@ -408,6 +661,99 @@ class XMLXSDValidatorApp:
                     changed += 1
 
         return changed
+
+    def _collect_targets_from_lines(self, tree: etree._ElementTree, lines: set[int]) -> tuple[set[str], set[str]]:
+        target_elements: set[str] = set()
+        target_attributes: set[str] = set()
+
+        for elem in tree.getroot().iter():
+            if elem.sourceline not in lines:
+                continue
+
+            if elem.text and elem.text.strip():
+                target_elements.add(self._local_name(elem.tag))
+            for attr_name in elem.attrib.keys():
+                target_attributes.add(self._local_name(attr_name))
+
+        return target_elements, target_attributes
+
+    def _anonymize_tree_by_targets(
+        self,
+        tree: etree._ElementTree,
+        target_elements: set[str],
+        target_attributes: set[str],
+    ) -> int:
+        changed = 0
+        for elem in tree.getroot().iter():
+            if self._local_name(elem.tag) in target_elements and elem.text is not None:
+                anon = self._anonymize_value(elem.text)
+                if anon != elem.text:
+                    elem.text = anon
+                    changed += 1
+
+            for attr_name, attr_value in list(elem.attrib.items()):
+                if self._local_name(attr_name) not in target_attributes:
+                    continue
+                anon = self._anonymize_value(attr_value)
+                if anon != attr_value:
+                    elem.attrib[attr_name] = anon
+                    changed += 1
+
+        return changed
+
+    def _local_name(self, name: str) -> str:
+        if name.startswith("{"):
+            return name.split("}", maxsplit=1)[1]
+        return name
+
+    def _build_hint(self, message: str, domain: str, error_type: str) -> str:
+        msg = message.strip()
+        msg_lower = msg.lower()
+
+        expected_match = EXPECTED_ELEMENT_RE.search(msg)
+        if expected_match:
+            expected = expected_match.group(1).replace("'", "").replace("{", "").replace("}", "")
+            return f"Element/order mismatch. Replace this element with one of: {expected}, or move it to the position expected by the schema."
+
+        not_allowed_attr = NOT_ALLOWED_ATTR_RE.search(msg)
+        if not_allowed_attr:
+            attr = not_allowed_attr.group(1)
+            return f"Attribute '{attr}' is not permitted here. Remove it or rename it to an attribute allowed for this element in the XSD."
+
+        missing_attr = MISSING_ATTR_RE.search(msg)
+        if missing_attr:
+            attr = missing_attr.group(1)
+            return f"Required attribute '{attr}' is missing. Add it to this element with a value matching the XSD type."
+
+        invalid_type = INVALID_TYPE_RE.search(msg)
+        if invalid_type:
+            atomic_type = invalid_type.group(1)
+            if atomic_type.endswith("date"):
+                return "Invalid date value. Use ISO format YYYY-MM-DD (example: 2026-03-02)."
+            if atomic_type.endswith("dateTime"):
+                return "Invalid datetime value. Use ISO format YYYY-MM-DDThh:mm:ss (optionally with timezone, e.g. Z)."
+            if atomic_type.endswith("int") or atomic_type.endswith("integer"):
+                return "Invalid integer value. Use digits only, no decimals or text."
+            if atomic_type.endswith("decimal"):
+                return "Invalid decimal value. Use a numeric value like 12.34."
+            return f"Value does not match expected type '{atomic_type}'. Update value to the XSD type format."
+
+        if PATTERN_FACET_RE.search(msg):
+            return "Value fails schema pattern. Check allowed format/regex in the XSD and adjust this value to match."
+
+        if ENUM_FACET_RE.search(msg):
+            return "Value is outside allowed enumeration. Replace it with one of the schema's permitted values."
+
+        if "no matching global declaration available for the validation root" in msg_lower:
+            return "Root element/namespace mismatch. Ensure XML root name and namespace URI match the schema target namespace."
+
+        if "this element is not expected" in msg_lower:
+            return "Unexpected element. Verify element name, namespace prefix, and order relative to sibling elements."
+
+        if domain == "XMLSyntax" or error_type == "XMLSyntaxError":
+            return "Malformed XML syntax. Check for unclosed tags, invalid characters, and quote mismatches near this line."
+
+        return "Review this node against the XSD definition for element name, namespace, required attributes, and value format."
 
     def _write(self, text: str) -> None:
         self.output.insert(tk.END, text)
