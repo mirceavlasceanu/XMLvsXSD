@@ -6,7 +6,7 @@ from tkinter import filedialog, messagebox, ttk
 
 from lxml import etree
 
-APP_VERSION = "1.4.2"
+APP_VERSION = "1.4.8"
 
 BG_COLOR = "#eef3f9"
 CARD_COLOR = "#ffffff"
@@ -30,6 +30,33 @@ MISSING_ATTR_RE = re.compile(r"The attribute '([^']+)' is required but missing\.
 INVALID_TYPE_RE = re.compile(r"is not a valid value of the atomic type '([^']+)'\.?")
 PATTERN_FACET_RE = re.compile(r"\[facet 'pattern'\]")
 ENUM_FACET_RE = re.compile(r"\[facet 'enumeration'\]")
+
+# Common ISO 20022 pain.* sensitive fields to anonymize globally.
+# Format: (kind, field_name, short_description), where kind is "element" or "attribute".
+COMMON_PAIN_FIELDS: list[tuple[str, str, str]] = [
+    ("element", "Nm", "Party name (debtor, creditor, ultimate parties)."),
+    ("element", "IBAN", "International bank account number."),
+    ("element", "BIC", "Bank identifier code."),
+    ("element", "BICFI", "Financial institution BIC."),
+    ("element", "Ustrd", "Unstructured remittance text."),
+    ("element", "AdrLine", "Address line."),
+    ("element", "StrtNm", "Street name."),
+    ("element", "BldgNb", "Building number."),
+    ("element", "PstCd", "Postal code."),
+    ("element", "TwnNm", "Town/city name."),
+    ("element", "CtrySubDvsn", "State/region/province."),
+    ("element", "Id", "Generic identifier value."),
+    ("element", "Othr", "Other/custom identifier."),
+    ("element", "PrvtId", "Private person identifier container."),
+    ("element", "OrgId", "Organization identifier container."),
+    ("element", "MsgId", "Message identifier."),
+    ("element", "PmtInfId", "Payment information identifier."),
+    ("element", "EndToEndId", "End-to-end transaction identifier."),
+    ("element", "InstrId", "Instruction identifier."),
+    ("element", "TxId", "Transaction identifier."),
+    ("element", "MndtId", "Mandate identifier (direct debit)."),
+    ("attribute", "Id", "Identifier used as XML attribute."),
+]
 
 
 class XMLXSDValidatorApp:
@@ -185,6 +212,7 @@ class XMLXSDValidatorApp:
         if path:
             self.xml_path = Path(path)
             self.xml_label.config(text=str(self.xml_path))
+            self._offer_pretty_format_on_upload(self.xml_path)
             self.status_var.set("XML selected. Ready to validate.")
 
     def validate(self) -> None:
@@ -313,7 +341,7 @@ class XMLXSDValidatorApp:
             self._show_warning("No details", "Run validation first and make sure there are errors.")
             return
 
-        xml_text = self.xml_path.read_text(encoding="utf-8", errors="replace")
+        xml_text = self._read_xml_for_editor(self.xml_path)
         win = tk.Toplevel(self.root)
         win.title("XML Error Details")
         win.geometry("1200x700")
@@ -342,6 +370,212 @@ class XMLXSDValidatorApp:
         )
         xml_editor.pack(fill=tk.BOTH, expand=True, padx=8, pady=(0, 8))
         xml_editor.insert("1.0", xml_text)
+
+        xml_controls = ttk.Frame(left, style="App.TFrame")
+        xml_controls.pack(fill=tk.X, padx=8, pady=(0, 8))
+
+        sync_guard = {"active": False}
+        rename_context = {"old_name": ""}
+        all_tags_var = tk.BooleanVar(value=False)
+
+        def index_to_offset(index: str) -> int:
+            return int(xml_editor.count("1.0", index, "chars")[0])
+
+        def offset_to_index(offset: int) -> str:
+            return f"1.0+{offset}c"
+
+        def parse_tag_tokens(text: str) -> list[dict[str, int | str | bool]]:
+            tokens: list[dict[str, int | str | bool]] = []
+            tag_re = re.compile(r"<(?P<closing>/)?(?P<name>[A-Za-z_][\w:.\-]*)(?P<tail>[^<>]*?)?>", re.DOTALL)
+            for match in tag_re.finditer(text):
+                closing = bool(match.group("closing"))
+                name = match.group("name")
+                tail = match.group("tail") or ""
+                self_closing = (not closing) and tail.rstrip().endswith("/")
+                name_start = match.start("name")
+                name_end = match.end("name")
+                tokens.append({
+                    "start": match.start(),
+                    "end": match.end(),
+                    "name_start": name_start,
+                    "name_end": name_end,
+                    "name": name,
+                    "closing": closing,
+                    "self_closing": self_closing,
+                })
+            return tokens
+
+        def tag_context_at_cursor(text: str, cursor_offset: int) -> tuple[int, dict[str, int | str | bool]] | tuple[None, None]:
+            tokens = parse_tag_tokens(text)
+            for idx, token in enumerate(tokens):
+                if int(token["name_start"]) <= cursor_offset <= int(token["name_end"]):
+                    return idx, token
+            return None, None
+
+        def build_structural_pairs(tokens: list[dict[str, int | str | bool]]) -> dict[int, int]:
+            pairs: dict[int, int] = {}
+            stack: list[int] = []
+            for idx, token in enumerate(tokens):
+                if bool(token["self_closing"]):
+                    continue
+                if bool(token["closing"]):
+                    if stack:
+                        open_idx = stack.pop()
+                        pairs[open_idx] = idx
+                        pairs[idx] = open_idx
+                else:
+                    stack.append(idx)
+            return pairs
+
+        def sync_paired_tag(_event=None) -> None:
+            if sync_guard["active"]:
+                return
+
+            text = xml_editor.get("1.0", tk.END)
+            cursor = index_to_offset("insert")
+            token_idx, token = tag_context_at_cursor(text, cursor)
+            if token is None:
+                return
+            if bool(token["self_closing"]):
+                return
+            new_name = str(token["name"])
+            old_name = str(rename_context.get("old_name", "") or "")
+            tokens = parse_tag_tokens(text)
+            pairs = build_structural_pairs(tokens)
+            partner_idx = pairs.get(token_idx)
+            counterpart = tokens[partner_idx] if partner_idx is not None else None
+
+            # Fallback for cases where key-press capture missed: infer previous name
+            # from the opposite paired tag that still has the original name.
+            if all_tags_var.get() and (not old_name or old_name == new_name) and counterpart is not None:
+                counterpart_name = str(counterpart["name"])
+                if counterpart_name != new_name:
+                    old_name = counterpart_name
+
+            if old_name and old_name != new_name and all_tags_var.get():
+                matches = [t for t in tokens if str(t["name"]) == old_name]
+                if matches:
+                    insert_before = xml_editor.index("insert")
+                    sync_guard["active"] = True
+                    try:
+                        for t in reversed(matches):
+                            xml_editor.delete(offset_to_index(int(t["name_start"])), offset_to_index(int(t["name_end"])))
+                            xml_editor.insert(offset_to_index(int(t["name_start"])), new_name)
+                        xml_editor.mark_set("insert", insert_before)
+                    finally:
+                        sync_guard["active"] = False
+                rename_context["old_name"] = ""
+                return
+
+            if counterpart is None:
+                return
+            if str(counterpart["name"]) == new_name:
+                return
+
+            insert_before = xml_editor.index("insert")
+            sync_guard["active"] = True
+            try:
+                xml_editor.delete(offset_to_index(int(counterpart["name_start"])), offset_to_index(int(counterpart["name_end"])))
+                xml_editor.insert(offset_to_index(int(counterpart["name_start"])), new_name)
+                xml_editor.mark_set("insert", insert_before)
+            finally:
+                sync_guard["active"] = False
+
+        def capture_tag_name_before_edit(_event=None) -> None:
+            if sync_guard["active"]:
+                return
+            text = xml_editor.get("1.0", tk.END)
+            cursor = index_to_offset("insert")
+            _idx, token = tag_context_at_cursor(text, cursor)
+            if token is None or bool(token["self_closing"]):
+                rename_context["old_name"] = ""
+                return
+            rename_context["old_name"] = str(token["name"])
+
+        def save_details_xml() -> None:
+            suggested_name = "edited.xml"
+            if self.xml_path is not None:
+                suggested_name = f"{self.xml_path.stem}_edited.xml"
+
+            target = filedialog.asksaveasfilename(
+                title="Save edited XML",
+                defaultextension=".xml",
+                filetypes=[("XML files", "*.xml"), ("All files", "*.*")],
+                initialfile=suggested_name,
+                parent=win,
+            )
+            if not target:
+                return
+
+            edited_text = xml_editor.get("1.0", tk.END)
+            try:
+                Path(target).write_text(edited_text, encoding="utf-8")
+            except OSError as exc:
+                self._show_error("Save failed", f"Could not save edited XML:\n{exc}", parent=win)
+                return
+
+            if not self.xsd_path:
+                self._show_info("Saved", f"Edited XML saved to:\n{target}\n\nNo XSD selected for recheck.", parent=win)
+                return
+
+            try:
+                schema = etree.XMLSchema(etree.parse(str(self.xsd_path)))
+                parser = etree.XMLParser(remove_blank_text=False)
+                xml_doc = etree.fromstring(edited_text.encode("utf-8"), parser=parser).getroottree()
+            except (etree.XMLSyntaxError, etree.XMLSchemaParseError, OSError) as exc:
+                parse_line = 1
+                parse_col = 1
+                if isinstance(exc, etree.XMLSyntaxError):
+                    parse_line = exc.lineno or 1
+                    parse_col = getattr(exc, "position", (1, 1))[1]
+                refresh_error_panel([{
+                    "line": parse_line,
+                    "column": parse_col,
+                    "message": str(exc),
+                    "domain": "XMLSyntax",
+                    "type": "XMLSyntaxError",
+                    "hint": self._build_hint(str(exc), "XMLSyntax", "XMLSyntaxError"),
+                }])
+                self.status_var.set("Validation failed after save.")
+                self._show_warning(
+                    "Saved with validation issue",
+                    f"Edited XML saved to:\n{target}\n\nCould not recheck against XSD:\n{exc}",
+                    parent=win,
+                )
+                return
+
+            if schema.validate(xml_doc):
+                refresh_error_panel([])
+                self.status_var.set("Validation passed after save.")
+                self._show_info("Saved and valid", f"Edited XML saved to:\n{target}\n\nSchema recheck passed.", parent=win)
+            else:
+                errors = list(schema.error_log)
+                refreshed_entries: list[dict[str, str | int]] = []
+                for entry in errors:
+                    refreshed_entries.append({
+                        "line": entry.line,
+                        "column": entry.column,
+                        "message": entry.message,
+                        "domain": entry.domain_name,
+                        "type": entry.type_name,
+                        "hint": self._build_hint(entry.message, entry.domain_name, entry.type_name),
+                    })
+                refresh_error_panel(refreshed_entries)
+                self.status_var.set("Validation failed after save.")
+                preview = "\n".join(
+                    f"Line {entry.line}, Col {entry.column}: {entry.message}" for entry in errors[:3]
+                )
+                suffix = "\n..." if len(errors) > 3 else ""
+                self._show_warning(
+                    "Saved but schema failed",
+                    f"Edited XML saved to:\n{target}\n\nSchema recheck found {len(errors)} error(s):\n{preview}{suffix}",
+                    parent=win,
+                )
+
+        ttk.Button(xml_controls, text="Save edited XML", command=save_details_xml, style="Secondary.TButton").pack(side=tk.LEFT)
+        ttk.Checkbutton(xml_controls, text="All tags", variable=all_tags_var).pack(side=tk.LEFT, padx=(10, 0))
+        xml_editor.bind("<KeyPress>", capture_tag_name_before_edit, add="+")
+        xml_editor.bind("<KeyRelease>", sync_paired_tag, add="+")
 
         ttk.Label(right, text="Drag the divider to resize sections", style="Hint.TLabel").pack(fill=tk.X, pady=(2, 6))
 
@@ -381,22 +615,22 @@ class XMLXSDValidatorApp:
         )
         details_panel.pack(fill=tk.BOTH, expand=True, pady=(0, 2))
 
-        for idx, err in enumerate(self.last_error_entries, 1):
-            error_list.insert(tk.END, f"{idx}. Line {err['line']}, Col {err['column']} - {str(err['message'])[:70]}")
-
         xml_editor.tag_configure("error_line", background="#ffe7e7")
 
         def on_select(_event=None) -> None:
             selected = error_list.curselection()
             if not selected:
                 return
+            if selected[0] >= len(self.last_error_entries):
+                return
             err = self.last_error_entries[selected[0]]
-            line = int(err["line"])
             xml_editor.tag_remove("error_line", "1.0", tk.END)
-            start = f"{line}.0"
-            end = f"{line}.0 lineend"
-            xml_editor.tag_add("error_line", start, end)
-            xml_editor.see(start)
+            line_val = err.get("line")
+            if isinstance(line_val, int) and line_val > 0:
+                start = f"{line_val}.0"
+                end = f"{line_val}.0 lineend"
+                xml_editor.tag_add("error_line", start, end)
+                xml_editor.see(start)
 
             details_panel.config(state=tk.NORMAL)
             details_panel.delete("1.0", tk.END)
@@ -411,17 +645,35 @@ class XMLXSDValidatorApp:
             )
             details_panel.config(state=tk.DISABLED)
 
-        error_list.bind("<<ListboxSelect>>", on_select)
-        if self.last_error_entries:
+        def refresh_error_panel(entries: list[dict[str, str | int]]) -> None:
+            self.last_error_entries = entries
+            error_list.delete(0, tk.END)
+            xml_editor.tag_remove("error_line", "1.0", tk.END)
+
+            details_panel.config(state=tk.NORMAL)
+            details_panel.delete("1.0", tk.END)
+            details_panel.config(state=tk.DISABLED)
+
+            if not entries:
+                error_list.insert(tk.END, "No schema errors.")
+                return
+
+            for idx, err in enumerate(entries, 1):
+                error_list.insert(tk.END, f"{idx}. Line {err['line']}, Col {err['column']} - {str(err['message'])[:70]}")
+
+            error_list.selection_clear(0, tk.END)
             error_list.selection_set(0)
             on_select()
+
+        error_list.bind("<<ListboxSelect>>", on_select)
+        refresh_error_panel(self.last_error_entries)
 
     def open_anonymize_window(self) -> None:
         if not self.xml_path:
             self._show_warning("Missing XML", "Please select an XML file first.")
             return
 
-        xml_text = self.xml_path.read_text(encoding="utf-8", errors="replace")
+        xml_text = self._read_xml_for_editor(self.xml_path)
 
         win = tk.Toplevel(self.root)
         win.title("Anonymize XML")
@@ -489,11 +741,14 @@ class XMLXSDValidatorApp:
 
         def render_gutter() -> None:
             line_count = int(editor.index("end-1c").split(".")[0])
+            line_digits = max(1, len(str(line_count)))
+            # marker "[ ]" + space + full line number width
+            gutter.config(width=max(8, line_digits + 4))
             gutter.config(state=tk.NORMAL)
             gutter.delete("1.0", tk.END)
             for line_no in range(1, line_count + 1):
                 mark = "[x]" if line_no in selected_lines else "[ ]"
-                gutter.insert(tk.END, f"{mark} {line_no}\n")
+                gutter.insert(tk.END, f"{mark} {line_no:>{line_digits}}\n")
             gutter.config(state=tk.DISABLED)
             refresh_highlights()
 
@@ -598,11 +853,132 @@ class XMLXSDValidatorApp:
             except Exception as exc:
                 self._show_error("Anonymize failed", f"Could not anonymize selected lines:\n{exc}", parent=win)
 
+        def anonymize_common_fields() -> None:
+            try:
+                detection_tree = parse_editor_xml()
+            except Exception as exc:
+                self._show_error("Analyze failed", f"Could not inspect XML for common fields:\n{exc}", parent=win)
+                return
+
+            present_elements: set[str] = set()
+            present_attributes: set[str] = set()
+            for elem in detection_tree.getroot().iter():
+                present_elements.add(self._local_name(elem.tag))
+                for attr_name in elem.attrib.keys():
+                    present_attributes.add(self._local_name(attr_name))
+
+            available_fields = [
+                (kind, field_name, description)
+                for kind, field_name, description in COMMON_PAIN_FIELDS
+                if (kind == "element" and field_name in present_elements)
+                or (kind == "attribute" and field_name in present_attributes)
+            ]
+
+            if not available_fields:
+                self._show_info(
+                    "No common fields found",
+                    "None of the configured common pain fields were found in this XML.",
+                    parent=win,
+                )
+                return
+
+            picker = tk.Toplevel(win)
+            picker.title("Common pain fields")
+            picker.geometry("760x520")
+            picker.configure(bg=BG_COLOR)
+            picker.transient(win)
+            picker.grab_set()
+
+            ttk.Label(
+                picker,
+                text="Select common pain fields to anonymize",
+                style="Section.TLabel",
+            ).pack(fill=tk.X, padx=12, pady=(12, 4))
+            ttk.Label(
+                picker,
+                text="All fields are selected by default. Untick the ones you want to keep unchanged.",
+                style="Subtitle.TLabel",
+            ).pack(fill=tk.X, padx=12, pady=(0, 10))
+
+            list_frame = ttk.Frame(picker, style="Card.TFrame", padding=8)
+            list_frame.pack(fill=tk.BOTH, expand=True, padx=12, pady=(0, 10))
+            list_frame.columnconfigure(0, weight=1)
+            list_frame.rowconfigure(0, weight=1)
+
+            canvas = tk.Canvas(list_frame, bg="#f8fbff", highlightthickness=0)
+            scroll = ttk.Scrollbar(list_frame, orient=tk.VERTICAL, command=canvas.yview)
+            rows = ttk.Frame(canvas, style="CardInner.TFrame")
+
+            canvas.configure(yscrollcommand=scroll.set)
+            canvas.grid(row=0, column=0, sticky="nsew")
+            scroll.grid(row=0, column=1, sticky="ns")
+
+            row_window = canvas.create_window((0, 0), window=rows, anchor="nw")
+
+            def on_rows_configure(_event=None) -> None:
+                canvas.configure(scrollregion=canvas.bbox("all"))
+
+            def on_canvas_configure(event) -> None:
+                canvas.itemconfig(row_window, width=event.width)
+
+            rows.bind("<Configure>", on_rows_configure)
+            canvas.bind("<Configure>", on_canvas_configure)
+
+            selections: list[tuple[str, str, tk.BooleanVar]] = []
+            for kind, field_name, description in available_fields:
+                var = tk.BooleanVar(value=True)
+                line_text = f"{field_name} ({kind}) - {description}"
+                ttk.Checkbutton(rows, text=line_text, variable=var).pack(anchor="w", fill=tk.X, padx=4, pady=2)
+                selections.append((kind, field_name, var))
+
+            controls = ttk.Frame(picker, style="App.TFrame")
+            controls.pack(fill=tk.X, padx=12, pady=(0, 12))
+
+            def apply_selected_common_fields() -> None:
+                target_elements = {name for kind, name, var in selections if kind == "element" and var.get()}
+                target_attributes = {name for kind, name, var in selections if kind == "attribute" and var.get()}
+                if not target_elements and not target_attributes:
+                    self._show_warning("No fields selected", "Please keep at least one field ticked.", parent=picker)
+                    return
+
+                try:
+                    tree = parse_editor_xml()
+                    changed = self._anonymize_tree_by_targets(
+                        tree,
+                        target_elements=target_elements,
+                        target_attributes=target_attributes,
+                    )
+                    refresh_editor(tree)
+                    picker.destroy()
+
+                    if changed == 0:
+                        self._show_info(
+                            "No changes",
+                            "No selected common pain fields were found with eligible values to anonymize.",
+                            parent=win,
+                        )
+                    else:
+                        self._show_info(
+                            "Anonymized",
+                            f"Anonymized selected common pain fields globally. Updated fields: {changed}.",
+                            parent=win,
+                        )
+                except Exception as exc:
+                    self._show_error("Anonymize failed", f"Could not anonymize common fields:\n{exc}", parent=picker)
+
+            ttk.Button(controls, text="Anonymize selected", command=apply_selected_common_fields, style="Primary.TButton").pack(side=tk.LEFT)
+            ttk.Button(controls, text="Cancel", command=picker.destroy, style="Secondary.TButton").pack(side=tk.RIGHT)
+
         def save_anonymized() -> None:
+            suggested_name = "anonymized.xml"
+            if self.xml_path is not None:
+                suggested_name = f"{self.xml_path.stem}_anonim.xml"
+
             target = filedialog.asksaveasfilename(
                 title="Save anonymized XML",
                 defaultextension=".xml",
                 filetypes=[("XML files", "*.xml"), ("All files", "*.*")],
+                initialfile=suggested_name,
                 parent=win,
             )
             if not target:
@@ -611,6 +987,7 @@ class XMLXSDValidatorApp:
             self._show_info("Saved", f"Anonymized XML saved to:\n{target}", parent=win)
 
         ttk.Button(bottom_controls, text="Anonymize all", command=anonymize_all, style="Primary.TButton").pack(side=tk.LEFT)
+        ttk.Button(bottom_controls, text="Anonymize common pain fields", command=anonymize_common_fields, style="Secondary.TButton").pack(side=tk.LEFT, padx=(8, 0))
         ttk.Button(bottom_controls, text="Anonymize selected tags globally", command=anonymize_selected_lines, style="Secondary.TButton").pack(side=tk.LEFT, padx=(8, 0))
         ttk.Button(bottom_controls, text="Save anonymized XML", command=save_anonymized, style="Secondary.TButton").pack(side=tk.RIGHT)
 
@@ -705,6 +1082,52 @@ class XMLXSDValidatorApp:
         if name.startswith("{"):
             return name.split("}", maxsplit=1)[1]
         return name
+
+    def _pretty_format_xml_bytes(self, xml_bytes: bytes) -> str | None:
+        try:
+            parser = etree.XMLParser(remove_blank_text=True)
+            root = etree.fromstring(xml_bytes, parser=parser)
+            return etree.tostring(root, pretty_print=True, encoding="utf-8", xml_declaration=True).decode("utf-8")
+        except (etree.XMLSyntaxError, ValueError):
+            return None
+
+    def _read_xml_for_editor(self, path: Path) -> str:
+        try:
+            pretty = self._pretty_format_xml_bytes(path.read_bytes())
+            if pretty is not None:
+                return pretty
+        except OSError:
+            pass
+        return path.read_text(encoding="utf-8", errors="replace")
+
+    def _offer_pretty_format_on_upload(self, path: Path) -> None:
+        try:
+            xml_bytes = path.read_bytes()
+        except OSError:
+            return
+
+        # Prompt only for likely minified files (single-line or almost single-line).
+        if xml_bytes.count(b"\n") > 1:
+            return
+
+        pretty = self._pretty_format_xml_bytes(xml_bytes)
+        if pretty is None:
+            return
+
+        current_text = xml_bytes.decode("utf-8", errors="replace")
+        if pretty.strip() == current_text.strip():
+            return
+
+        if messagebox.askyesno(
+            "Pretty format XML",
+            "This XML looks minified/single-line.\n\nDo you want to pretty-format and save it now?",
+            parent=self.root,
+        ):
+            try:
+                path.write_text(pretty, encoding="utf-8")
+                self.status_var.set("XML selected and pretty-formatted.")
+            except OSError as exc:
+                self._show_error("Format failed", f"Could not save formatted XML:\n{exc}")
 
     def _build_hint(self, message: str, domain: str, error_type: str) -> str:
         msg = message.strip()
